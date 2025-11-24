@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GitHub User Search</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              inter: ["Inter", "system-ui", "sans-serif"],
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+  <body class="min-h-screen bg-slate-950 text-slate-100">
+    <div id="root" class="flex justify-center px-4 py-8"></div>
+
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="text/babel">
+      const { useState, useEffect, useCallback, useMemo } = React;
+
+      const RESULTS_PER_PAGE = 10;
+      const RATE_LIMIT_ERROR = "RATE_LIMIT";
+
+      /**
+       * Dedicated data-fetching helper keeps network logic out of components.
+       */
+      const fetchGitHubUsers = async (query, page, signal) => {
+        if (!query.trim()) {
+          return { items: [], total_count: 0 };
+        }
+
+        const endpoint = new URL("https://api.github.com/search/users");
+        endpoint.searchParams.set("q", `${query} in:login`);
+        endpoint.searchParams.set("page", String(page));
+        endpoint.searchParams.set("per_page", String(RESULTS_PER_PAGE));
+
+        const response = await fetch(endpoint, {
+          headers: { Accept: "application/vnd.github+json" },
+          signal,
+        });
+
+        if (!response.ok) {
+          if (response.status === 403) {
+            const error = new Error("GitHub API rate limit exceeded.");
+            error.code = RATE_LIMIT_ERROR;
+            throw error;
+          }
+          throw new Error("Failed to fetch users. Please retry.");
+        }
+
+        return response.json();
+      };
+
+      const useGitHubUserSearch = () => {
+        const [query, setQuery] = useState("");
+        const [page, setPage] = useState(1);
+        const [users, setUsers] = useState([]);
+        const [totalCount, setTotalCount] = useState(0);
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState(null);
+
+        useEffect(() => {
+          const controller = new AbortController();
+
+          const loadUsers = async () => {
+            if (!query.trim()) {
+              setUsers([]);
+              setTotalCount(0);
+              setError(null);
+              return;
+            }
+
+            setLoading(true);
+            setError(null);
+
+            try {
+              const data = await fetchGitHubUsers(query, page, controller.signal);
+              setUsers(data.items ?? []);
+              setTotalCount(data.total_count ?? 0);
+            } catch (err) {
+              if (err.name !== "AbortError") {
+                setError(err.code === RATE_LIMIT_ERROR ? RATE_LIMIT_ERROR : err.message || "Unknown error");
+                setUsers([]);
+                setTotalCount(0);
+              }
+            } finally {
+              setLoading(false);
+            }
+          };
+
+          loadUsers();
+
+          return () => controller.abort();
+        }, [query, page]);
+
+        const totalPages = useMemo(
+          () => (totalCount ? Math.ceil(totalCount / RESULTS_PER_PAGE) : 0),
+          [totalCount]
+        );
+
+        const startNewSearch = useCallback((nextQuery) => {
+          setQuery(nextQuery);
+          setPage(1); // reset pagination whenever the query changes
+        }, []);
+
+        const goToPage = useCallback(
+          (nextPage) => {
+            setPage((prev) => {
+              if (nextPage < 1 || (totalPages && nextPage > totalPages)) {
+                return prev;
+              }
+              return nextPage;
+            });
+          },
+          [totalPages]
+        );
+
+        return {
+          state: { query, page, users, totalPages, totalCount, loading, error },
+          actions: { startNewSearch, goToPage },
+        };
+      };
+
+      const App = () => {
+        const {
+          state: { page, users, totalPages, totalCount, loading, error },
+          actions: { startNewSearch, goToPage },
+        } = useGitHubUserSearch();
+        const [inputValue, setInputValue] = useState("");
+
+        const handleSubmit = (event) => {
+          event.preventDefault();
+          startNewSearch(inputValue.trim());
+        };
+
+        const hasTotalCount = totalCount > 0;
+        const derivedTotalPages = hasTotalCount ? Math.max(totalPages, 1) : 1;
+        const noResultsLoaded = users.length === 0;
+        const reachedEnd =
+          hasTotalCount
+            ? page >= derivedTotalPages || page * RESULTS_PER_PAGE >= totalCount
+            : users.length < RESULTS_PER_PAGE && !loading && !noResultsLoaded;
+        const prevDisabled = loading || page === 1 || noResultsLoaded;
+        const nextDisabled = loading || reachedEnd || noResultsLoaded;
+
+        const errorMessage =
+          error === RATE_LIMIT_ERROR
+            ? "GitHub API rate limit hit. Please wait a minute or add an auth token."
+            : error;
+
+        return (
+          <div className="w-full max-w-4xl rounded-2xl border border-slate-800 bg-slate-900/70 p-8 shadow-2xl shadow-slate-900/40">
+            <h1 className="mb-6 text-center text-3xl font-semibold">GitHub User Search</h1>
+
+            <form
+              onSubmit={handleSubmit}
+              className="mb-6 flex flex-wrap items-center gap-3"
+            >
+              <input
+                type="text"
+                placeholder="Search GitHub usernames..."
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                className="flex-1 min-w-[200px] rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+              />
+              <button
+                className="rounded-xl bg-emerald-500 px-5 py-3 font-semibold text-slate-900 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+                type="submit"
+                disabled={!inputValue.trim() || loading}
+              >
+                Search
+              </button>
+              <button
+                className="rounded-xl border border-slate-700 px-5 py-3 font-semibold text-slate-100 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+                type="button"
+                onClick={() => {
+                  setInputValue("");
+                  startNewSearch("");
+                }}
+                disabled={!inputValue && noResultsLoaded}
+              >
+                Reset
+              </button>
+            </form>
+
+            {loading && (
+              <div
+                aria-live="polite"
+                role="status"
+                className="mx-auto my-10 h-12 w-12 animate-spin rounded-full border-4 border-slate-700 border-t-blue-400"
+              ></div>
+            )}
+
+            {error && (
+              <div className="mt-4 rounded-2xl border border-rose-500/50 bg-rose-500/10 px-4 py-6 text-center text-rose-200">
+                {errorMessage}
+              </div>
+            )}
+
+            {!loading && !error && totalCount === 0 && (
+              <div className="mt-4 rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-center text-slate-400">
+                Start typing to find GitHub users.
+              </div>
+            )}
+
+            {!loading && !error && users.length > 0 && (
+              <>
+                <p className="text-sm text-slate-400">
+                  Showing {(page - 1) * RESULTS_PER_PAGE + 1}-
+                  {Math.min(page * RESULTS_PER_PAGE, totalCount || (page - 1) * RESULTS_PER_PAGE + users.length)} of{" "}
+                  {totalCount || users.length || 0} users
+                </p>
+                <ul className="mt-4 flex flex-col gap-3">
+                  {users.map((user) => (
+                    <li
+                      key={user.id}
+                      className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-md shadow-slate-900/40 sm:flex-row sm:items-center"
+                    >
+                      <img
+                        src={user.avatar_url}
+                        alt={`${user.login}'s avatar`}
+                        className="h-16 w-16 rounded-full border-2 border-emerald-500 object-cover"
+                      />
+                      <div className="flex flex-1 flex-col gap-3">
+                        <div>
+                          <p className="text-xs uppercase tracking-wide text-slate-500">
+                            Username
+                          </p>
+                          <p className="text-lg font-semibold text-slate-100">{user.login}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs uppercase tracking-wide text-slate-500">
+                            Profile URL
+                          </p>
+                          <a
+                            href={user.html_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="break-all text-sm font-medium text-blue-400 hover:text-blue-300"
+                          >
+                            {user.html_url}
+                          </a>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+              <button
+                className="rounded-xl border border-slate-700 px-5 py-3 font-semibold text-slate-100 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+                type="button"
+                onClick={() => goToPage(page - 1)}
+                disabled={prevDisabled}
+              >
+                Previous
+              </button>
+              <span className="text-sm text-slate-400">
+                Page {hasTotalCount ? page : 1} of {derivedTotalPages}
+              </span>
+              <button
+                className="rounded-xl border border-slate-700 px-5 py-3 font-semibold text-slate-100 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+                type="button"
+                onClick={() => goToPage(page + 1)}
+                disabled={nextDisabled}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        );
+      };
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
+
+
